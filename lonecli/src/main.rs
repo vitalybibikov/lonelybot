@@ -235,13 +235,27 @@ fn test_solve(seed: &Seed, draw_step: NonZeroU8, terminated: &Arc<AtomicBool>) {
     let mut g_standard = StandardSolitaire::from(&g);
 
     let now = Instant::now();
-    let res = solver::run_solve(g, true, terminated);
-    println!("Run in {} ms", now.elapsed().as_secs_f64() * 1000f64);
-    println!("Statistic\n{}", res.1);
-    match res.0 {
+    let (result, stats, hist, tp_len) = solver::run_solve(g, true, terminated);
+    let elapsed = now.elapsed();
+    let elapsed_ms = elapsed.as_secs_f64() * 1000f64;
+
+    println!("Run in {elapsed_ms} ms");
+    println!("Statistic\n{stats}");
+
+    #[allow(clippy::cast_precision_loss)]
+    let rate = stats.total_visit() as f64 / elapsed.as_secs_f64();
+    println!("States/sec: {rate:.0}");
+    println!(
+        "Transposition table: {} entries (~{} KiB at 8B/entry)",
+        tp_len,
+        (tp_len * 8) / 1024
+    );
+
+    match result {
         SearchResult::Solved => {
-            let m = res.2.unwrap();
+            let m = hist.unwrap();
             println!("Solvable in {} moves", m.len());
+            print_solution_histogram(&m);
             println!();
             let moves = convert_moves(&mut g_standard, &m[..]).unwrap();
             for x in &m {
@@ -249,18 +263,6 @@ fn test_solve(seed: &Seed, draw_step: NonZeroU8, terminated: &Arc<AtomicBool>) {
             }
             println!();
             println!();
-
-            // let mut dep_e = DependencyEngine::new(g);
-            // for mm in &m {
-            //     assert!(dep_e.do_move(*mm));
-            // }
-
-            // for link in dep_e.get() {
-            //     println!("{} -> {}", link.0, link.1);
-            // }
-
-            // println!();
-            // println!();
 
             for m in &moves {
                 print!("{m}  ");
@@ -274,6 +276,23 @@ fn test_solve(seed: &Seed, draw_step: NonZeroU8, terminated: &Arc<AtomicBool>) {
         SearchResult::Terminated => println!("Terminated"),
         SearchResult::Crashed => println!("Crashed"),
     }
+}
+
+fn print_solution_histogram(moves: &[lonelybot::moves::Move]) {
+    use lonelybot::moves::Move;
+    let (mut reveal, mut pile_stack, mut deck_pile, mut deck_stack, mut stack_pile) = (0, 0, 0, 0, 0);
+    for m in moves {
+        match m {
+            Move::Reveal(_) => reveal += 1,
+            Move::PileStack(_) => pile_stack += 1,
+            Move::DeckPile(_) => deck_pile += 1,
+            Move::DeckStack(_) => deck_stack += 1,
+            Move::StackPile(_) => stack_pile += 1,
+        }
+    }
+    println!(
+        "Move breakdown: Reveal={reveal} PileStack={pile_stack} DeckPile={deck_pile} DeckStack={deck_stack} StackPile={stack_pile} (worry-back={stack_pile})"
+    );
 }
 
 fn rand_solve(seed: &Seed, draw_step: NonZeroU8, start_seed: u64, terminated: &Arc<AtomicBool>) {
@@ -300,12 +319,12 @@ fn rand_solve(seed: &Seed, draw_step: NonZeroU8, start_seed: u64, terminated: &A
     println!("{}", Solvitaire(game.state().into()));
 
     let now = Instant::now();
-    let res = solver::run_solve(game.into_state(), true, terminated);
+    let (result, stats, hist, _tp_len) = solver::run_solve(game.into_state(), true, terminated);
     println!("Run in {} ms", now.elapsed().as_secs_f64() * 1000f64);
-    println!("Statistic\n{}", res.1);
-    match res.0 {
+    println!("Statistic\n{stats}");
+    match result {
         SearchResult::Solved => {
-            let m = res.2.unwrap();
+            let m = hist.unwrap();
             println!("Solvable in {} moves", m.len());
             for x in m {
                 print!("{x}, ");
@@ -395,6 +414,15 @@ fn solve_loop(org_seed: &Seed, draw_step: NonZeroU8, terminated: &Arc<AtomicBool
     let mut cnt_solve = 0u32;
     let mut cnt_total = 0u32;
 
+    // Running aggregates across all seeds.
+    let mut sum_visits = 0u64;
+    let mut sum_unique = 0u64;
+    let mut sum_tp_len = 0u64;
+    let mut sum_time_ms = 0f64;
+    let mut sum_max_foundation = 0u64;
+    let mut sum_min_hidden = 0u64;
+    let mut min_hidden_obs_count = 0u64;
+
     let start = Instant::now();
 
     for step in 0.. {
@@ -403,7 +431,8 @@ fn solve_loop(org_seed: &Seed, draw_step: NonZeroU8, terminated: &Arc<AtomicBool
         let g = Solitaire::new(&shuffled_deck, draw_step);
 
         let now = Instant::now();
-        let (res, stats, _) = solver::run_solve(g, false, terminated);
+        let (res, stats, _, tp_len) = solver::run_solve(g, false, terminated);
+        let run_ms = now.elapsed().as_secs_f64() * 1000f64;
         match res {
             SearchResult::Solved => cnt_solve += 1,
             SearchResult::Terminated => cnt_terminated += 1,
@@ -411,6 +440,16 @@ fn solve_loop(org_seed: &Seed, draw_step: NonZeroU8, terminated: &Arc<AtomicBool
         }
 
         cnt_total += 1;
+
+        sum_visits += stats.total_visit() as u64;
+        sum_unique += stats.unique_visit() as u64;
+        sum_tp_len += tp_len as u64;
+        sum_time_ms += run_ms;
+        sum_max_foundation += u64::from(stats.max_stack_reached());
+        if stats.min_hidden_down() != u8::MAX {
+            sum_min_hidden += u64::from(stats.min_hidden_down());
+            min_hidden_obs_count += 1;
+        }
 
         let lower = NSuccessesSample::new(cnt_total, cnt_solve)
             .unwrap()
@@ -433,8 +472,41 @@ fn solve_loop(org_seed: &Seed, draw_step: NonZeroU8, terminated: &Arc<AtomicBool
             stats.total_visit(),
             stats.unique_visit(),
             stats.max_depth(),
-            now.elapsed().as_secs_f64() * 1000f64,
+            run_ms,
         );
+
+        // Every 100 games, print a running aggregate line so long runs stay informative.
+        if cnt_total % 100 == 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let n = f64::from(cnt_total);
+            #[allow(clippy::cast_precision_loss)]
+            let avg_visits = sum_visits as f64 / n;
+            #[allow(clippy::cast_precision_loss)]
+            let avg_unique = sum_unique as f64 / n;
+            #[allow(clippy::cast_precision_loss)]
+            let avg_tp = sum_tp_len as f64 / n;
+            let avg_ms = sum_time_ms / n;
+            #[allow(clippy::cast_precision_loss)]
+            let avg_max_found = sum_max_foundation as f64 / n;
+            let avg_min_hidden = if min_hidden_obs_count == 0 {
+                f64::NAN
+            } else {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    sum_min_hidden as f64 / min_hidden_obs_count as f64
+                }
+            };
+            println!(
+                "  [agg n={}] avg_visits={:.0} avg_unique={:.0} avg_tp={:.0} avg_time={:.2}ms avg_max_found={:.1}/52 avg_min_hidden={:.1}",
+                cnt_total,
+                avg_visits,
+                avg_unique,
+                avg_tp,
+                avg_ms,
+                avg_max_found,
+                avg_min_hidden,
+            );
+        }
 
         if terminated.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(500));

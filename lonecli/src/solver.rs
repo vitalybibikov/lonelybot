@@ -1,10 +1,10 @@
 use core::time::Duration;
 use lonelybot::{
     graph::{graph_with_tracking, Graph},
-    solver::{solve_with_tracking, HistoryVec, SearchResult},
+    solver::{solve_with_tp, HistoryVec, SearchResult},
     state::Solitaire,
     tracking::TerminateSignal,
-    traverse::Control,
+    traverse::{Control, TpTable},
 };
 use std::{
     sync::{
@@ -37,7 +37,7 @@ pub(crate) fn run_solve(
     mut g: Solitaire,
     verbose: bool,
     term_signal: &Arc<AtomicBool>,
-) -> (SearchResult, AtomicSearchStats, Option<HistoryVec>) {
+) -> (SearchResult, AtomicSearchStats, Option<HistoryVec>, usize) {
     let ss = Arc::new(AtomicSearchStats::new());
 
     let (send, recv) = channel::<()>();
@@ -49,15 +49,18 @@ pub(crate) fn run_solve(
         thread::Builder::new()
             .stack_size(STACK_SIZE)
             .spawn(move || {
-                let res = solve_with_tracking(
+                let mut tp = TpTable::default();
+                let res = solve_with_tp(
                     &mut g,
                     ss_clone.as_ref(),
                     &TermSignal {
                         term_signal: term.as_ref(),
                     },
+                    &mut tp,
                 );
+                let tp_len = tp.len();
                 send.send(()).ok();
-                res
+                (res, tp_len)
             })
             .unwrap()
     };
@@ -71,9 +74,11 @@ pub(crate) fn run_solve(
         }
     }
 
-    let (res, hist) = child.join().unwrap_or((SearchResult::Crashed, None));
+    let ((res, hist), tp_len) = child
+        .join()
+        .unwrap_or(((SearchResult::Crashed, None), 0));
 
-    (res, Arc::try_unwrap(ss).unwrap(), hist)
+    (res, Arc::try_unwrap(ss).unwrap(), hist, tp_len)
 }
 
 pub(crate) fn run_graph(
