@@ -42,13 +42,22 @@ impl<S: SearchStatistics, T: TerminateSignal> Callback for SolverCallback<'_, S,
         }
 
         self.stats.hit_a_state(self.history.len());
-        self.stats
-            .hit_game_state(game.get_stack().len(), game.get_hidden().total_down_cards());
+        self.stats.hit_game_state(
+            game.get_stack().len(),
+            game.get_hidden().total_down_cards(),
+            game.get_deck().len(),
+            game.visible_count(),
+        );
         Control::Ok
     }
 
     fn on_move_gen(&mut self, m: &crate::moves::MoveMask, _: Encode) -> Control {
         self.stats.hit_unique_state(self.history.len(), m.len());
+        Control::Ok
+    }
+
+    fn on_pruner_info(&mut self, unfiltered: u32, filtered: u32, _: Encode) -> Control {
+        self.stats.hit_pruner_info(unfiltered, filtered);
         Control::Ok
     }
 

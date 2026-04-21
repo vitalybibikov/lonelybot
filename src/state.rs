@@ -101,6 +101,11 @@ impl Solitaire {
     }
 
     #[must_use]
+    pub const fn visible_count(&self) -> u32 {
+        self.visible_mask.count_ones()
+    }
+
+    #[must_use]
     const fn get_locked_mask(&self) -> u64 {
         self.hidden.get_locked_mask()
     }

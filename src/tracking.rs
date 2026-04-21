@@ -4,7 +4,17 @@ pub trait SearchStatistics {
     fn finish_move(&self, depth: usize);
 
     // Game-state snapshot on every visit. Default no-op preserves all existing impls.
-    fn hit_game_state(&self, _stack_len: u8, _hidden_down: u8) {}
+    fn hit_game_state(
+        &self,
+        _stack_len: u8,
+        _hidden_down: u8,
+        _deck_len: u8,
+        _visible: u32,
+    ) {
+    }
+
+    // Called at each expansion with the move counts before and after the FullPruner.
+    fn hit_pruner_info(&self, _unfiltered: u32, _filtered: u32) {}
 }
 
 pub struct EmptySearchStats;

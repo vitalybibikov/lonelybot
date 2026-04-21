@@ -36,6 +36,17 @@ pub trait Callback {
         Control::Ok
     }
 
+    // Move counts before and after the FullPruner filter, so callers can
+    // observe what fraction of moves the pruner is removing. Default no-op.
+    fn on_pruner_info(
+        &mut self,
+        _unfiltered: u32,
+        _filtered: u32,
+        _encode: Encode,
+    ) -> Control {
+        Control::Ok
+    }
+
     fn on_do_move(
         &mut self,
         _game: &Solitaire,
@@ -82,11 +93,17 @@ pub fn traverse<T: TranspositionTable, C: Callback>(
         return Control::Ok;
     }
 
-    let move_list = game
-        .gen_moves::<true>()
-        .filter(&prune_info.prune_moves(game));
+    let unfiltered = game.gen_moves::<true>();
+    let unfiltered_count = unfiltered.len();
+    let move_list = unfiltered.filter(&prune_info.prune_moves(game));
 
     match callback.on_move_gen(&move_list, encode) {
+        Control::Halt => return Control::Halt,
+        Control::Skip => return Control::Skip,
+        Control::Ok => {}
+    }
+
+    match callback.on_pruner_info(unfiltered_count, move_list.len(), encode) {
         Control::Halt => return Control::Halt,
         Control::Skip => return Control::Skip,
         Control::Ok => {}

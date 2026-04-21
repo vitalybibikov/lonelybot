@@ -2,6 +2,8 @@ Lonelybot
 =========
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+> **Fork note (vitalybibikov/lonelybot)** — this fork extends the solver's observable metrics without touching its search logic. See the [Fork Changes](#fork-changes-vitalybibikovlonelybot) section below for the full list of new statistics and an example of the enriched `solve` / `rate` output.
+
 ## Crates
 - Lonelybot is a library crate with #no_std support, and can be use in webassembly
 - Lonecli is a binary wrapper crate on lonelybot to provide the features through CLI
@@ -410,6 +412,84 @@ So the solvability is 47.58 ± 0.80 (compared to the previous 36.97 ± 1.92 from
 The average running time for one game is only a few seconds.
 
 However due to the significant improvement, I think this needs more verification.
+
+## Fork changes (vitalybibikov/lonelybot)
+
+This fork adds instrumentation to the solver's DFS so `lonecli solve` and `lonecli rate` surface much more diagnostic data per run. The search logic, pruning rules, and correctness guarantees of upstream are untouched — all changes are additive observers hooked into the existing `Callback` / `SearchStatistics` traits.
+
+### Library changes (`src/`)
+
+Two new default-no-op methods extend `SearchStatistics` (`src/tracking.rs`):
+
+- `hit_game_state(stack_len, hidden_down, deck_len, visible)` — called on every `on_visit`. Lets implementations track per-state features (foundation size, remaining face-down cards, deck remaining, visible-card count) without a separate accessor-walk.
+- `hit_pruner_info(unfiltered, filtered)` — called on every expansion. Receives the move count before and after the `FullPruner` filter so callers can compute what fraction of moves the pruner eliminated on top of the dominance rules inside `gen_moves`.
+
+One new default-no-op method on `Callback` (`src/traverse.rs`):
+
+- `on_pruner_info(unfiltered, filtered, encode)` — the traversal now binds the unfiltered `MoveMask` explicitly and passes both counts through this hook right after `on_move_gen`.
+
+One new `pub` method on `Solitaire`:
+
+- `Solitaire::visible_count() -> u32` — `count_ones()` on the internal `visible_mask`, avoiding a redundant `compute_visible_mask` call from outside.
+
+One new solver entry point:
+
+- `solver::solve_with_tp` — identical to `solve_with_tracking` but accepts a caller-owned `TpTable`, so the CLI can read `tp.len()` after the search completes.
+
+### CLI changes (`lonecli/`)
+
+`AtomicSearchStats` now tracks, and its `Display` impl now prints, the following on every `solve`:
+
+| Stat | Description |
+|---|---|
+| `Backtracks` | Number of `on_undo_move` events — useful for Ctrl-C diagnostics (`visits - backtracks - 1 ≈ stack depth at termination`). |
+| `Branching avg / max / dead-ends` | Post-pruner move count statistics per expansion; dead-ends are expansions with zero legal moves. |
+| `Pruner reduction (post-dominance) %` | Average share of moves eliminated by the `FullPruner` compared to the dominance-rule-filtered `gen_moves::<true>()`. |
+| `Max foundation reached: N/52` | High-water mark of cards on the foundation across all visited states. |
+| `Min hidden-cards seen: N` | Low-water mark of face-down cards in the tableau — for `Impossible` games this is *how close* the search got to winning. |
+| `Max visible cards: N/45` | Complementary to the hidden count — peak visible tableau size. |
+| `Sure-win states visited` | Count of states where `is_sure_win()` held (deck ≤ 1, no face-down cards) — a correctness-sanity check and an indicator of how often the search reached the trivial endgame. |
+| `States/sec` | Throughput over wall time. |
+| `Transposition table: N entries (~K KiB)` | Final TT size, reported via `solve_with_tp`. |
+
+Solved-only output also includes:
+
+- `Move breakdown: Reveal=… PileStack=… DeckPile=… DeckStack=… StackPile=… (worry-back=…)` — per-variant count over the returned `HistoryVec`. Non-zero `StackPile` means the solution required un-stacking from the foundation.
+
+### `rate` aggregate line
+
+The `lonecli rate` loop prints a running aggregate every 100 games:
+
+```
+[agg n=100] avg_visits=353214 avg_unique=180451 avg_tp=180451 avg_time=116.73ms avg_max_found=45.1/52 avg_min_hidden=2.0
+```
+
+This surfaces the mean search cost and progress-toward-win across a sweep, independent of the solvability Wilson-score interval already shown per-game.
+
+### Example enriched output
+
+```
+$ lonecli solve default 0 3
+Run in 1.74 ms
+Statistic
+Total visit: 13412
+Transposition hit: 6722 (rate 0.5012)
+Miss state: 6690
+Max depth search: 26
+Backtracks: 13411
+Branching (post-prune): avg 2.00, max 8, dead-ends 535
+Pruner reduction (post-dominance): 25.13%
+Max foundation reached: 7/52
+Min hidden-cards seen: 14
+Max visible cards: 23/45
+Sure-win states visited: 0
+Current progress: 4/4 5/5 3/3 1/1 2/2 2/2 2/2 1/1
+States/sec: 7693852
+Transposition table: 6690 entries (~52 KiB at 8B/entry)
+Impossible
+```
+
+Compared to the 6-line Statistic block upstream prints, this gives you: cost (states/sec, TT size), progress on Impossible games (max foundation, min hidden), solver diagnostics (branching, dead-ends, pruner reduction), and a backtracks counter — all without changing what the solver does, only what it tells you about what it did.
 
 ## Method
 
