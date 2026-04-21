@@ -35,13 +35,15 @@ impl<S: SearchStatistics, T: TerminateSignal> Callback for SolverCallback<'_, S,
         Control::Halt
     }
 
-    fn on_visit(&mut self, _: &Solitaire, _: Encode) -> Control {
+    fn on_visit(&mut self, game: &Solitaire, _: Encode) -> Control {
         if self.sign.is_terminated() {
             self.result = SearchResult::Terminated;
             return Control::Halt;
         }
 
         self.stats.hit_a_state(self.history.len());
+        self.stats
+            .hit_game_state(game.get_stack().len(), game.get_hidden().total_down_cards());
         Control::Ok
     }
 
@@ -69,7 +71,17 @@ pub fn solve_with_tracking<S: SearchStatistics, T: TerminateSignal>(
     sign: &T,
 ) -> (SearchResult, Option<HistoryVec>) {
     let mut tp = TpTable::default();
+    solve_with_tp(game, stats, sign, &mut tp)
+}
 
+// Same as solve_with_tracking but accepts a caller-owned transposition table,
+// so the caller can inspect its size after the search completes.
+pub fn solve_with_tp<S: SearchStatistics, T: TerminateSignal>(
+    game: &mut Solitaire,
+    stats: &S,
+    sign: &T,
+    tp: &mut TpTable,
+) -> (SearchResult, Option<HistoryVec>) {
     let mut callback = SolverCallback {
         history: HistoryVec::new(),
         stats,
@@ -77,7 +89,7 @@ pub fn solve_with_tracking<S: SearchStatistics, T: TerminateSignal>(
         result: SearchResult::Unsolvable,
     };
 
-    traverse(game, FullPruner::default(), &mut tp, &mut callback);
+    traverse(game, FullPruner::default(), tp, &mut callback);
 
     let result = callback.result;
 

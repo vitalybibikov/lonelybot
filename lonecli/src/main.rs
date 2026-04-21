@@ -235,13 +235,27 @@ fn test_solve(seed: &Seed, draw_step: NonZeroU8, terminated: &Arc<AtomicBool>) {
     let mut g_standard = StandardSolitaire::from(&g);
 
     let now = Instant::now();
-    let res = solver::run_solve(g, true, terminated);
-    println!("Run in {} ms", now.elapsed().as_secs_f64() * 1000f64);
-    println!("Statistic\n{}", res.1);
-    match res.0 {
+    let (result, stats, hist, tp_len) = solver::run_solve(g, true, terminated);
+    let elapsed = now.elapsed();
+    let elapsed_ms = elapsed.as_secs_f64() * 1000f64;
+
+    println!("Run in {elapsed_ms} ms");
+    println!("Statistic\n{stats}");
+
+    #[allow(clippy::cast_precision_loss)]
+    let rate = stats.total_visit() as f64 / elapsed.as_secs_f64();
+    println!("States/sec: {rate:.0}");
+    println!(
+        "Transposition table: {} entries (~{} KiB at 8B/entry)",
+        tp_len,
+        (tp_len * 8) / 1024
+    );
+
+    match result {
         SearchResult::Solved => {
-            let m = res.2.unwrap();
+            let m = hist.unwrap();
             println!("Solvable in {} moves", m.len());
+            print_solution_histogram(&m);
             println!();
             let moves = convert_moves(&mut g_standard, &m[..]).unwrap();
             for x in &m {
@@ -249,18 +263,6 @@ fn test_solve(seed: &Seed, draw_step: NonZeroU8, terminated: &Arc<AtomicBool>) {
             }
             println!();
             println!();
-
-            // let mut dep_e = DependencyEngine::new(g);
-            // for mm in &m {
-            //     assert!(dep_e.do_move(*mm));
-            // }
-
-            // for link in dep_e.get() {
-            //     println!("{} -> {}", link.0, link.1);
-            // }
-
-            // println!();
-            // println!();
 
             for m in &moves {
                 print!("{m}  ");
@@ -274,6 +276,23 @@ fn test_solve(seed: &Seed, draw_step: NonZeroU8, terminated: &Arc<AtomicBool>) {
         SearchResult::Terminated => println!("Terminated"),
         SearchResult::Crashed => println!("Crashed"),
     }
+}
+
+fn print_solution_histogram(moves: &[lonelybot::moves::Move]) {
+    use lonelybot::moves::Move;
+    let (mut reveal, mut pile_stack, mut deck_pile, mut deck_stack, mut stack_pile) = (0, 0, 0, 0, 0);
+    for m in moves {
+        match m {
+            Move::Reveal(_) => reveal += 1,
+            Move::PileStack(_) => pile_stack += 1,
+            Move::DeckPile(_) => deck_pile += 1,
+            Move::DeckStack(_) => deck_stack += 1,
+            Move::StackPile(_) => stack_pile += 1,
+        }
+    }
+    println!(
+        "Move breakdown: Reveal={reveal} PileStack={pile_stack} DeckPile={deck_pile} DeckStack={deck_stack} StackPile={stack_pile} (worry-back={stack_pile})"
+    );
 }
 
 fn rand_solve(seed: &Seed, draw_step: NonZeroU8, start_seed: u64, terminated: &Arc<AtomicBool>) {
@@ -300,12 +319,12 @@ fn rand_solve(seed: &Seed, draw_step: NonZeroU8, start_seed: u64, terminated: &A
     println!("{}", Solvitaire(game.state().into()));
 
     let now = Instant::now();
-    let res = solver::run_solve(game.into_state(), true, terminated);
+    let (result, stats, hist, _tp_len) = solver::run_solve(game.into_state(), true, terminated);
     println!("Run in {} ms", now.elapsed().as_secs_f64() * 1000f64);
-    println!("Statistic\n{}", res.1);
-    match res.0 {
+    println!("Statistic\n{stats}");
+    match result {
         SearchResult::Solved => {
-            let m = res.2.unwrap();
+            let m = hist.unwrap();
             println!("Solvable in {} moves", m.len());
             for x in m {
                 print!("{x}, ");
@@ -403,7 +422,7 @@ fn solve_loop(org_seed: &Seed, draw_step: NonZeroU8, terminated: &Arc<AtomicBool
         let g = Solitaire::new(&shuffled_deck, draw_step);
 
         let now = Instant::now();
-        let (res, stats, _) = solver::run_solve(g, false, terminated);
+        let (res, stats, _, _) = solver::run_solve(g, false, terminated);
         match res {
             SearchResult::Solved => cnt_solve += 1,
             SearchResult::Terminated => cnt_terminated += 1,
