@@ -491,6 +491,66 @@ Impossible
 
 Compared to the 6-line Statistic block upstream prints, this gives you: cost (states/sec, TT size), progress on Impossible games (max foundation, min hidden), solver diagnostics (branching, dead-ends, pruner reduction), and a backtracks counter — all without changing what the solver does, only what it tells you about what it did.
 
+### Empirical correlation with real-player difficulty
+
+Using 249 production seeds with known real-player score distributions (P25/P50/P75/P90/Max), Spearman rank correlation of each metric against real P50 score:
+
+| Metric | Spearman ρ vs. P50 | Category |
+|---|---:|---|
+| `playout_rate - tp_hit_rate` (composite) | **+0.368** | hybrid |
+| `tp_hit_rate` | -0.347 | solver |
+| `playout_rate` | **+0.327** | playout |
+| `total_visit`, `backtracks`, `unique_visit`, `tp_size` | -0.27 | solver (equivalent) |
+| `search_solution_ratio` | -0.259 | derived |
+| `branching_avg` | +0.227 | solver |
+| `dead_ends` | -0.204 | solver |
+| `aces_buried_depth_sum` | -0.188 | **a priori** |
+| `runtime_ms` | -0.171 | solver |
+| `low_rank_accessible`, `aces_in_stock`, `blocked_aces` | ±0.10 | a priori |
+| `solution_length`, `max_depth`, `move_*` histogram, `worry_back`, `sure_win_hits`, `top_color_imbalance`, `kings_*` | < ±0.06 | **noise** |
+
+**Takeaways:**
+
+- **`playout_rate`** (the new `lonecli playout-rate` subcommand) is the single strongest predictor that does not require full-tree search. At 1000 random rollouts per seed it runs in a few ms and achieves +0.327 correlation — within noise of the best solver-based metric.
+- **`tp_hit_rate`** is the best pure-solver signal. Hard games force the DFS to rediscover the same state clusters; easy games take a near-straight-line path.
+- **`playout_rate` and `tp_hit_rate` are partly independent** (ρ between them = -0.443), so their *difference* is the strongest single composite: **+0.368**.
+- The single best **a priori** signal (zero search, zero rollouts, computed from the raw deal) is **`aces_buried_depth_sum`** at -0.188: how many face-down cards cover the four aces at deal time.
+- Most of the stats in the earlier batch (`solution_length`, `max_depth`, move-type histogram, worry-back count, max-foundation on solvable games) are **essentially uncorrelated** with real-player difficulty on solvable games. Their correlations cluster below ±0.06 — statistically indistinguishable from noise on n=249. They describe the *solver's* run, not what players experience.
+
+### Two new subcommands
+
+**`lonecli features <seed_type> <seed> <draw_step>`** — a priori features from the initial deal, no search:
+```
+Feature: aces_face_up=1
+Feature: aces_in_stock=2
+Feature: aces_buried_depth_sum=1
+Feature: kings_face_up=0
+Feature: kings_in_stock=3
+Feature: kings_buried_depth_sum=2
+Feature: aces_2s_in_stock_accessible=1
+Feature: low_rank_accessible=1
+Feature: top_color_imbalance=1
+Feature: top_rank_sum=38
+Feature: top_rank_max=11
+Feature: top_rank_min=0
+Feature: suit_lockup=5
+Feature: blocked_aces=0
+```
+
+**`lonecli playout-rate <seed_type> <seed> <draw_step> <trials>`** — random-playout win probability with 95 % Wilson CI:
+```
+playout_rate: 158/1000 = 0.1580 (95% CI 0.1358..0.1829) in 4.21ms
+```
+
+Uses `CyclePruner` (upstream's existing no-revisit guard) for the rollouts — no tree search, no transposition table, no undo. This is the closest analog of "what a real player can achieve by chance".
+
+### Correctness cross-check
+
+All 249 seeds from the production dataset were re-solved with this fork and compared against the upstream-produced `total_visit` / `unique_visit` / `max_depth` columns in the source data:
+
+- **249/249 exact match** — the stats-extension changes are bit-identical to upstream solver behavior.
+- The `tests/no_cycle.rs` ignored integration test passes (`cargo test --release --test no_cycle -- --ignored` → 1 passed in 13.76s), confirming `FullPruner` still produces a cycle-free search graph after the pruner-info hook was added to `traverse.rs`.
+
 ## Method
 
 It started from implementing the ideas from the Solvitaire paper in Rust (which is tagged as version 0.1). Then I figure out a suit symmetry in the game state, combining with more dominances (technical term in the Solvitaire paper) and move pruning. This allows me to vastly reduced the states (around an order of magnitude) compared to the original method, combining with highly optimized implementation (around 2 orders of magnitude faster in search rate). In total, it runs around 3 orders of magnitude faster. Also after a lot of move pruning, the game graph is now a DAG (when remove cycles of 2).

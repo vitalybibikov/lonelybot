@@ -517,6 +517,208 @@ fn solve_loop(org_seed: &Seed, draw_step: NonZeroU8, terminated: &Arc<AtomicBool
     println!("Total run time: {:?}", start.elapsed());
 }
 
+// Initial-deal layout per Solitaire::new: indices 0..28 are the pile layers with
+// pile i occupying positions (i*(i+1)/2 .. (i+2)*(i+1)/2 - 1) inclusive and the
+// face-up top at (i+2)*(i+1)/2 - 1. Indices 28..52 are the stock.
+const PILE_TOP_POS: [u8; 7] = [0, 2, 5, 9, 14, 20, 27];
+const PILE_START_POS: [u8; 7] = [0, 1, 3, 6, 10, 15, 21];
+
+fn pile_of(deck_pos: u8) -> Option<u8> {
+    if deck_pos >= 28 {
+        return None;
+    }
+    for p in (0..7u8).rev() {
+        if deck_pos >= PILE_START_POS[p as usize] {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn print_deal_features(seed: &Seed, draw_step: NonZeroU8) {
+    use lonelybot::deck::N_PILE_CARDS;
+    let cards = shuffle(seed);
+
+    let mut aces_face_up = 0u32;
+    let mut aces_in_stock = 0u32;
+    let mut aces_buried_depth_sum = 0u32;
+
+    let mut kings_face_up = 0u32;
+    let mut kings_in_stock = 0u32;
+    let mut kings_buried_depth_sum = 0u32;
+
+    let mut aces_2s_in_stock_accessible = 0u32;
+    let mut low_rank_accessible = 0u32; // ranks 0..3 (A,2,3,4) available on first pass
+
+    // Walk the full deck.
+    #[allow(clippy::cast_possible_truncation)]
+    for (i, c) in cards.iter().enumerate() {
+        let pos = i as u8;
+        let rank = c.rank();
+        let is_ace = rank == 0;
+        let is_king = rank == 12;
+        let is_low = rank < 4;
+        let in_stock = pos >= N_PILE_CARDS;
+
+        if in_stock {
+            if is_ace {
+                aces_in_stock += 1;
+            }
+            if is_king {
+                kings_in_stock += 1;
+            }
+            let stock_idx = pos - N_PILE_CARDS;
+            // Draw-k exposes positions stock_idx = k-1, 2k-1, 3k-1, ... on first pass.
+            let is_cursor = (stock_idx + 1) % draw_step.get() == 0 || pos == 51;
+            if is_cursor {
+                if is_ace || rank == 1 {
+                    aces_2s_in_stock_accessible += 1;
+                }
+                if is_low {
+                    low_rank_accessible += 1;
+                }
+            }
+        } else {
+            let p = pile_of(pos).unwrap();
+            let top = PILE_TOP_POS[p as usize];
+            if pos == top {
+                if is_ace {
+                    aces_face_up += 1;
+                }
+                if is_king {
+                    kings_face_up += 1;
+                }
+            } else if is_ace {
+                aces_buried_depth_sum += u32::from(top - pos);
+            } else if is_king {
+                kings_buried_depth_sum += u32::from(top - pos);
+            }
+        }
+    }
+
+    // Pile-top color balance: suits 0,1 = red (H,D); 2,3 = black (C,S).
+    let mut red_tops = 0u32;
+    let mut black_tops = 0u32;
+    let mut top_rank_sum = 0u32;
+    let mut top_rank_max = 0u8;
+    let mut top_rank_min = 13u8;
+    for &top_pos in &PILE_TOP_POS {
+        let c = cards[top_pos as usize];
+        if c.suit() < 2 {
+            red_tops += 1;
+        } else {
+            black_tops += 1;
+        }
+        let r = c.rank();
+        top_rank_sum += u32::from(r);
+        if r > top_rank_max {
+            top_rank_max = r;
+        }
+        if r < top_rank_min {
+            top_rank_min = r;
+        }
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let color_imbalance = (red_tops as i32 - black_tops as i32).abs() as u32;
+
+    // Non-top cards in each pile blocking its own suit in foundation order:
+    // rough proxy — count of face-down ranks less than the face-up top in same suit.
+    let mut suit_lockup = 0u32;
+    for p in 0..7u8 {
+        let start = PILE_START_POS[p as usize];
+        let top = PILE_TOP_POS[p as usize];
+        let top_c = cards[top as usize];
+        for pos in start..top {
+            let c = cards[pos as usize];
+            if c.suit() == top_c.suit() && c.rank() < top_c.rank() {
+                suit_lockup += 1;
+            }
+        }
+    }
+
+    // Top ace of each suit: is it blocked? And depth of the 2s behind their ace.
+    let mut blocked_aces = 0u32;
+    for suit in 0..4u8 {
+        let ace_pos = cards
+            .iter()
+            .position(|c| c.rank() == 0 && c.suit() == suit)
+            .unwrap() as u8;
+        let two_pos = cards
+            .iter()
+            .position(|c| c.rank() == 1 && c.suit() == suit)
+            .unwrap() as u8;
+        // Blocked if ace is in pile below its 2 (2 covers the ace position-wise in the same pile).
+        if ace_pos < 28 && two_pos < 28 {
+            if let (Some(ap), Some(tp)) = (pile_of(ace_pos), pile_of(two_pos)) {
+                if ap == tp && two_pos > ace_pos {
+                    blocked_aces += 1;
+                }
+            }
+        }
+    }
+
+    println!("Feature: aces_face_up={aces_face_up}");
+    println!("Feature: aces_in_stock={aces_in_stock}");
+    println!("Feature: aces_buried_depth_sum={aces_buried_depth_sum}");
+    println!("Feature: kings_face_up={kings_face_up}");
+    println!("Feature: kings_in_stock={kings_in_stock}");
+    println!("Feature: kings_buried_depth_sum={kings_buried_depth_sum}");
+    println!("Feature: aces_2s_in_stock_accessible={aces_2s_in_stock_accessible}");
+    println!("Feature: low_rank_accessible={low_rank_accessible}");
+    println!("Feature: top_color_imbalance={color_imbalance}");
+    println!("Feature: top_rank_sum={top_rank_sum}");
+    println!("Feature: top_rank_max={top_rank_max}");
+    println!("Feature: top_rank_min={top_rank_min}");
+    println!("Feature: suit_lockup={suit_lockup}");
+    println!("Feature: blocked_aces={blocked_aces}");
+}
+
+fn do_playout_rate(seed: &Seed, draw_step: NonZeroU8, trials: u32) {
+    use lonelybot::engine::SolitaireEngine;
+    use lonelybot::pruning::CyclePruner;
+    use lonelybot::state::Solitaire;
+
+    let shuffled = shuffle(seed);
+    let start = Instant::now();
+    let mut wins = 0u32;
+    // low_u64 avoids panic on 256-bit exact seeds; the deal is already fixed by `shuffled`,
+    // so the RNG only needs to diversify playout moves, not the deal.
+    let rng_seed_base = seed.seed().low_u64();
+
+    for i in 0..trials {
+        let mut game: SolitaireEngine<CyclePruner> =
+            Solitaire::new(&shuffled, draw_step).into();
+        let mut rng = SmallRng::seed_from_u64(rng_seed_base.wrapping_add(u64::from(i)));
+
+        loop {
+            if game.state().is_win() {
+                wins += 1;
+                break;
+            }
+            let moves = game.list_moves_dom();
+            if moves.is_empty() {
+                break;
+            }
+            let m = *moves.choose(&mut rng).unwrap();
+            game.do_move(m);
+        }
+    }
+
+    let interval = NSuccessesSample::new(trials, wins)
+        .unwrap()
+        .wilson_score(1.960);
+    let elapsed = start.elapsed();
+    println!(
+        "playout_rate: {}/{} = {:.4} (95% CI {:.4}..{:.4}) in {:.2?}",
+        wins,
+        trials,
+        f64::from(wins) / f64::from(trials),
+        interval.lower(),
+        interval.upper(),
+        elapsed
+    );
+}
+
 fn handling_signal() -> Arc<AtomicBool> {
     let terminated = Arc::new(AtomicBool::new(false));
 
@@ -604,6 +806,21 @@ enum Commands {
         seed: StringSeed,
         draw_step: NonZeroU8,
     },
+
+    // A priori deal features computed directly from the shuffled deck, no search.
+    Features {
+        #[command(flatten)]
+        seed: StringSeed,
+        draw_step: NonZeroU8,
+    },
+
+    // Random-playout win probability for a single seed.
+    PlayoutRate {
+        #[command(flatten)]
+        seed: StringSeed,
+        draw_step: NonZeroU8,
+        trials: u32,
+    },
 }
 
 fn main() {
@@ -666,6 +883,16 @@ fn main() {
                     elapsed
                 );
             }
+        }
+        Commands::Features { seed, draw_step } => {
+            print_deal_features(&seed.into(), *draw_step);
+        }
+        Commands::PlayoutRate {
+            seed,
+            draw_step,
+            trials,
+        } => {
+            do_playout_rate(&seed.into(), *draw_step, *trials);
         }
     }
 }
